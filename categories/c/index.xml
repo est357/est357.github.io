@@ -6,19 +6,18 @@
     <description>Recent content in C on est357</description>
     <generator>Hugo -- gohugo.io</generator>
     <language>en-us</language>
-    <lastBuildDate>Sun, 14 Jun 2020 00:06:47 +0300</lastBuildDate>
+    <lastBuildDate>Sun, 14 Jun 2020 16:06:47 +0300</lastBuildDate>
     
 	<atom:link href="https://est357.github.io/categories/c/index.xml" rel="self" type="application/rss+xml" />
     
     
     <item>
-      <title>Test post</title>
-      <link>https://est357.github.io/posts/my-first-post/</link>
-      <pubDate>Sun, 14 Jun 2020 00:06:47 +0300</pubDate>
+      <title>GO BPF libraries: cilium ebpf vs iovisor gobpf</title>
+      <link>https://est357.github.io/posts/cilium_iovisor/</link>
+      <pubDate>Sun, 14 Jun 2020 16:06:47 +0300</pubDate>
       
-      <guid>https://est357.github.io/posts/my-first-post/</guid>
-      <description>Introduction Test 123
-dadadd ada</description>
+      <guid>https://est357.github.io/posts/cilium_iovisor/</guid>
+      <description>Introduction This post does not cover the basics of eBPF. There are a lot of resources online for that now (cilium documentation and other blog posts). Rather we will be looking at a comparison of these 2 GO libraries from the point of view of loading BPF programs from ELF files. These libraries have additional functionalities (bcc for iovisor and asm for cilium) with which we are not concerned at this time.</description>
     </item>
     
   </channel>

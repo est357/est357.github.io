@@ -1,0 +1,487 @@
+<!doctype html>
+<html>
+<head>
+    <base href="/">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="author" content="John Doe">
+
+<meta name="description" content="">
+
+<title>GO BPF libraries: cilium ebpf vs iovisor gobpf</title>
+<meta name="generator" content="Hugo 0.72.0" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.1.0/styles/pojoaque.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.1.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+
+<link href="https://fonts.googleapis.com/css?family=Source+Code+Pro:400,700" rel="stylesheet" type="text/css">
+<link  href="https://est357.github.io//css/theme.min.css" rel="stylesheet" type="text/css">
+
+</head>
+<body>
+<div class="page-container container-fluid">
+<div class="col-md-3 menu">
+    <nav class="col-md-3">
+    
+    <h3 class="home-link"><a href="https://est357.github.io/">Root</a></h3>
+    <div id="last-posts" class="open">
+        <h3 data-open="last-posts">est357 - Most recent posts</h3>
+        <ul>
+            
+            <li><a href="https://est357.github.io/posts/cilium_iovisor/">GO BPF libraries: cilium ebpf vs iovisor gobpf</a></li>
+            
+        </ul>
+    </div>
+    
+
+    
+    <div id="tags" class="open">
+        <h3 data-open="tags">Tags</h3>
+        <ul class="tags">
+            
+            <li><a href="/tags/ebpf">ebpf</a></li>
+            
+        </ul>
+    </div>
+    
+
+    
+    <div id="categories" class="open">
+        <h3 data-open="categories">Categories</h3>
+        <ul class="categories">
+            
+            <li><a href="/categories/bpf">bpf</a></li>
+            
+            <li><a href="/categories/c">c</a></li>
+            
+            <li><a href="/categories/go">go</a></li>
+            
+        </ul>
+    </div>
+    
+</nav>
+
+</div>
+<div class="col-md-9 content">
+
+<h1>GO BPF libraries: cilium ebpf vs iovisor gobpf</h1>
+<h4>Published 06-14-2020 16:06:47</h4>
+
+<a href="https://twitter.com/share" class="twitter-share-button" data-via="kendo5731"></a>
+<script>!function (d, s, id) {
+    var js, fjs = d.getElementsByTagName(s)[0], p = /^http:/.test(d.location) ? 'http' : 'https';
+    if (!d.getElementById(id)) {
+        js = d.createElement(s);
+        js.id = id;
+        js.src = p + '://platform.twitter.com/widgets.js';
+        fjs.parentNode.insertBefore(js, fjs);
+    }
+}(document, 'script', 'twitter-wjs');</script>
+
+<div class="fb-share-button" data-href="https://est357.github.io/posts/cilium_iovisor/" data-layout="button"></div>
+<div id="fb-root"></div>
+<script>(function(d, s, id) {
+    var js, fjs = d.getElementsByTagName(s)[0];
+    if (d.getElementById(id)) return;
+    js = d.createElement(s); js.id = id;
+    js.src = "//connect.facebook.net/en-US/sdk.js#xfbml=1&version=v2.5";
+    fjs.parentNode.insertBefore(js, fjs);
+}(document, 'script', 'facebook-jssdk'));</script>
+
+<article>
+    <h1 id="introduction">Introduction</h1>
+<p>This post does not cover the basics of eBPF. There are a lot of resources online for that now (cilium documentation and other blog posts). Rather we will be looking at a comparison of these 2 GO libraries from the point of view of loading BPF programs from ELF files. These libraries have additional functionalities (bcc for iovisor and asm for cilium) with which we are not concerned at this time.  For quick t-shooting bcc is fine but if you want to build a service based on BPF with long running processes then I think loading the programs from ELFs is the way to go so that you also cut down on the dependencies like kernel source or headers.</p>
+<h1 id="loading-a-socket_filter-bpf-program-type">Loading a SOCKET_FILTER BPF program type</h1>
+<p>We will use a simple sample we found in the kernel source for testing:</p>
+<pre><code>#include &lt;linux/bpf.h&gt;
+#include &lt;linux/if_ether.h&gt;
+#include &lt;linux/if_packet.h&gt;
+#include &lt;linux/ip.h&gt;
+#include &quot;include/bpf_helpers.h&quot;
+#include &lt;linux/types.h&gt;
+#include &quot;include/types.h&quot;
+
+#ifndef offsetof
+#define offsetof(TYPE, MEMBER) ((size_t) &amp; ((TYPE *)0)-&gt;MEMBER)
+#endif
+
+struct bpf_map_def SEC(&quot;maps&quot;) my_map = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(long),
+	.max_entries = 256,
+};
+
+SEC(&quot;socket1&quot;)
+int filter(struct __sk_buff *skb)
+{
+  char fmt0[] = &quot;Hello from filter !&quot;;
+  bpf_trace_printk(fmt0, sizeof(fmt0));
+	int index = load_byte(skb, ETH_HLEN + offsetof(struct iphdr, protocol));
+	long *value;
+
+/*  if (skb-&gt;pkt_type != PACKET_OUTGOING)
+		return 0;
+*/
+	value = bpf_map_lookup_elem(&amp;my_map, &amp;index);
+	if (value)
+		__sync_fetch_and_add(value, skb-&gt;len);
+
+	return 0;
+}
+char _license[] SEC(&quot;license&quot;) = &quot;GPL&quot;;
+
+</code></pre><p>For compiling the restricted C code out of the kernel tree I use a folder structure like this:</p>
+<p><img src="img/folder_struct.png" alt="folder struct"></p>
+<p>There are several header files taken out of the kernel source which I keep in the include folder. Maybe we won&rsquo;t need all of them for our examples from this post but I found that depending on the program you write those files may be needed.</p>
+<p>Compile the program with clang (you have to have kernel headers package installed):</p>
+<pre><code>cd bpf_prog; clang -D__KERNEL__ -D__ASM_SYSREG_H -Wno-unused-value -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wunused -Wall -Werror -O2 -g -target bpf -c filter_test2.c -o filter.o
+</code></pre><h2 id="iovisor-gobpfelf-library">Iovisor gobpf/elf library</h2>
+<p>Iovisor gobpf library uses CGO quite a lot so in order to compile the GO program you will need the kernel headers.
+Iovisor uses it&rsquo;s own map format and they encourage you to use that otherwise the loading of the maps will fail because the library checks that map sizes are 280 bytes which is the size of the custom map struct they use.</p>
+<pre><code>#define BUF_SIZE_MAP_NS 256
+
+typedef struct bpf_map_def {
+	unsigned int type;
+	unsigned int key_size;
+	unsigned int value_size;
+	unsigned int max_entries;
+	unsigned int map_flags;
+	unsigned int pinning;
+	char namespace[BUF_SIZE_MAP_NS];
+} bpf_map_def;
+
+enum bpf_pin_type {
+	PIN_NONE = 0,
+	PIN_OBJECT_NS,
+	PIN_GLOBAL_NS,
+	PIN_CUSTOM_NS,
+};
+
+</code></pre><p>It is here: <a href="https://github.com/iovisor/gobpf/blob/master/elf/include/bpf_map.h">https://github.com/iovisor/gobpf/blob/master/elf/include/bpf_map.h</a> and you can add it to your include folder.
+You should also <strong>comment your <code>struct bpf_map_def</code></strong> from the original bpf_helpers.h file.
+So the first part of our C BPF program now looks like this (included the iovisor bpf_map_def and modified the map as per new map def):</p>
+<pre><code>#include &lt;linux/bpf.h&gt;
+#include &lt;linux/if_ether.h&gt;
+#include &lt;linux/if_packet.h&gt;
+#include &lt;linux/ip.h&gt;
+#include &quot;include/bpf_helpers.h&quot;
+#include &quot;include/iovisor_gobpf_map_def.h&quot;
+#include &lt;linux/types.h&gt;
+#include &quot;include/types.h&quot;
+
+#ifndef offsetof
+#define offsetof(TYPE, MEMBER) ((size_t) &amp; ((TYPE *)0)-&gt;MEMBER)
+#endif
+
+struct bpf_map_def SEC(&quot;maps/my_map&quot;) my_map = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(__u32),
+	.value_size = sizeof(long),
+	.max_entries = 256,
+        .pinning = 0,
+        .namespace = &quot;&quot;,
+};
+
+</code></pre><p>Notice that the section name of the map has to be changed for iovisor as it looks for maps in sections of the format map/&lt;map_name&gt;.</p>
+<p>With that out of the way we can now use the gobpf/elf library in GO to load the bpf socket program into the kernel VM and use it. The loading of a BPF socket filter type program goes like this:</p>
+<pre><code>mod := elf.NewModule(&quot;bpf_prog/filter.o&quot;)
+
+if err := mod.Load(nil); err != nil {
+  panic(err)
+}
+
+sf := mod.SocketFilter(&quot;socket1&quot;)
+
+sock, err := openRawSock(index)
+if err != nil {
+  panic(err)
+}
+defer syscall.Close(sock)
+
+if err := elf.AttachSocketFilter(sf, sock); err != nil {
+  panic(err)
+}
+
+myMap := mod.Map(&quot;my_map&quot;)
+
+var key uint32 = 6
+var value int64
+
+for {
+  time.Sleep(1 * time.Second)
+
+  mod.LookupElement(myMap, unsafe.Pointer(&amp;key), unsafe.Pointer(&amp;value))
+  fmt.Println(&quot;The value is: &quot;, value)
+}
+
+
+</code></pre><p>So what happens here is:</p>
+<ul>
+<li>Each ELF is parsed into a module which is a concept of the developers and includes all BPF maps/functions that the ELF contains. The point is that the module can be later used to get what we need.</li>
+<li>The Load() method loads the BPF programs into the kernel via the bpf() syscall and gets the maps out of the ELF.</li>
+<li>Because we have a socket filter type program we use the SocketFilter() method to get a socket filter struct which contains (most importantly) the FD of the program loaded into the kernel. We will use this one later although the actual FD will be abstracted.</li>
+<li>We open a raw socket and bind it to the interface on which we want to attach our filter. You can check out that function in the full code file.</li>
+<li>With the AttachSocketFilter() method we attach the BPF program through it&rsquo;s FD to the raw socket FD through a setsockopt() syscall.</li>
+<li>We get the map.</li>
+<li>We iterate on the map to get the values. The BPF program actually increments with the len field in the skb for every key. The key is the ip header protocol which shows the next layer (transport layer) protocol. Here we read just the key with value 6 (TCP) since it will be the majority of packets and we are just playing.</li>
+</ul>
+<p>Full GO code is <a href="code/iovisor.go">here</a></p>
+<h2 id="cilium-ebpf-library">Cilium ebpf library</h2>
+<p>Cilium ebpf library has no special requirements so we can leave the original BPF program as it is and simply load it.</p>
+<pre><code>spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(program))
+if err != nil {
+  panic(err)
+}
+
+coll, err := ebpf.NewCollection(spec)
+if err != nil {
+  panic(err)
+}
+defer coll.Close()
+
+prog := coll.DetachProgram(&quot;filter&quot;)
+if prog == nil {
+  panic(&quot;no program named filter found&quot;)
+}
+defer prog.Close()
+
+sock, err := openRawSock(index)
+if err != nil {
+  panic(err)
+}
+defer syscall.Close(sock)
+
+if err := syscall.SetsockoptInt(sock, syscall.SOL_SOCKET, SO_ATTACH_BPF, prog.FD()); err != nil {
+  panic(err)
+}
+
+fmt.Printf(&quot;Filtering on eth index: %d\n&quot;, index)
+fmt.Println(&quot;Packet stats:&quot;)
+
+myMap := coll.DetachMap(&quot;my_map&quot;)
+if myMap == nil {
+  panic(fmt.Errorf(&quot;no map named duration_end found&quot;))
+}
+defer myMap.Close()
+
+var key uint32 = 6
+var value int64
+
+for {
+
+  time.Sleep(time.Second)
+
+  if err := myMap.Lookup(key, &amp;value); err != nil {
+    if strings.Contains(err.Error(), &quot;key does not exist&quot;) {
+      log.Printf(&quot;Key does not exist yet !&quot;)
+    } else {
+      panic(err)
+    }
+  }
+
+  fmt.Printf(&quot;Value: %d\n&quot;, value)
+
+}
+
+</code></pre><p>The basic steps are the same as for the iovisor/gobpf but the terminology is different. Here the programs and maps found in the ELF by the function LoadCollectionSpecFromReader() are called a collection spec.</p>
+<p>So what happens is:</p>
+<ul>
+<li>By running NewCollection() the programs are loaded in the kernel and we get a collection object which we further use for getting the program FD and maps.</li>
+<li>By calling DetachProgram() we get the program object containing the FD.</li>
+<li>We open the saw socket, bind it to the interface and get the FD.</li>
+<li>We attach the BPF program FD to the raw socket FD with the setsockopt() syscall.</li>
+<li>We get the map.</li>
+<li>We iterate over the map and print the value.</li>
+</ul>
+<h1 id="loading-a-kprobe-bpf-program-type">Loading a KPROBE BPF program type</h1>
+<p>This simple kprobe program will get the filename of any file that has been opened in the system and print it in the trace buffer:</p>
+<pre><code>#include &lt;uapi/linux/bpf.h&gt;
+#include &lt;uapi/linux/ptrace.h&gt;
+#include &lt;linux/version.h&gt;
+#include &lt;bpf/bpf_helpers.h&gt;
+
+#define PT_REGS_PARM2(x) ((x)-&gt;si)
+
+SEC(&quot;kprobe/do_sys_open&quot;)
+int kprobe__do_sys_open(struct pt_regs *ctx)
+{
+		char file_name[256];
+
+		bpf_probe_read(file_name, sizeof(file_name), PT_REGS_PARM2(ctx));
+
+		char fmt[] = &quot;file %s\n&quot;;
+		bpf_trace_printk(fmt, sizeof(fmt), &amp;file_name);
+
+		return 0;
+}
+
+char _license[] SEC(&quot;license&quot;) = &quot;GPL&quot;;
+u32 _version SEC(&quot;version&quot;) = LINUX_VERSION_CODE;
+
+</code></pre><p>For simplicity reasons we don&rsquo;t use a map anymore. But you could use a map to store/get values just like in the example above for SOCKET_FILTER programs for both libraries. The same limitation applies for the iovisor library in which if you were to use a map you would have to use their <strong>own map format</strong>.
+After we load the program into the kernel we will be reading the trace ringbuffer like this:</p>
+<pre><code>cat  /sys/kernel/debug/tracing/trace_pipe
+</code></pre><h2 id="iovisor-gobpfelf-library-1">Iovisor gobpf/elf library</h2>
+<p>We can load it with the following go program:</p>
+<pre><code>package main
+
+import (
+	&quot;fmt&quot;
+	&quot;time&quot;
+
+	&quot;github.com/iovisor/gobpf/elf&quot;
+)
+
+func main() {
+	mod := elf.NewModule(&quot;bpf_prog/kprobe_example.o&quot;)
+
+	err := mod.Load(nil)
+	if err != nil {
+		panic(err)
+	}
+
+	err = mod.EnableKprobes(0)
+	if err != nil {
+		panic(err)
+	}
+
+	for {
+		fmt.Println(&quot;Waiting...&quot;)
+		time.Sleep(10 * time.Second)
+	}
+}
+
+</code></pre><p>As you can see it is pretty straightforward. The iovisor library takes care of most of the operations needed and all we see is the magic.</p>
+<h2 id="cilium-ebpf-library-1">Cilium ebpf library</h2>
+<p>We load with the following go program:</p>
+<pre><code>package main
+
+import (
+	&quot;bytes&quot;
+	&quot;fmt&quot;
+	&quot;io/ioutil&quot;
+	&quot;strconv&quot;
+	&quot;strings&quot;
+	&quot;time&quot;
+
+	&quot;github.com/cilium/ebpf&quot;
+	&quot;golang.org/x/sys/unix&quot;
+)
+
+func getTracepointID(eventName string) (uint64, error) {
+	data, err := ioutil.ReadFile(&quot;/sys/kernel/debug/tracing/events/kprobes/&quot; + eventName + &quot;/id&quot;)
+	if err != nil {
+		return 0, fmt.Errorf(&quot;failed to read tracepoint ID for 'sys_enter_open': %v&quot;, err)
+	}
+	tid := strings.TrimSuffix(string(data), &quot;\n&quot;)
+	return strconv.ParseUint(tid, 10, 64)
+}
+func createTracepoint(eventName string) error {
+
+	var out = &quot;p:kprobes/&quot; + eventName + &quot;_est123 &quot; + eventName
+	fmt.Println(&quot;Create event buff:&quot;, out)
+	if err := ioutil.WriteFile(&quot;/sys/kernel/debug/tracing/kprobe_events&quot;, []byte(out), 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+var bpfprogramFile string = &quot;bpf_prog/kprobe_example.o&quot;
+
+func main() {
+
+	program, err := ioutil.ReadFile(bpfprogramFile)
+	if err != nil {
+		panic(&quot;Error reading BPF program:&quot; + err.Error())
+	}
+
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(program))
+	if err != nil {
+		panic(err)
+	}
+
+	coll, err := ebpf.NewCollection(spec)
+	if err != nil {
+		panic(err)
+	}
+
+	prog := coll.DetachProgram(&quot;kprobe__do_sys_open&quot;)
+	if prog == nil {
+		panic(&quot;no program named kprobe__do_sys_open found&quot;)
+	}
+	defer prog.Close()
+
+	fmt.Println(&quot;Program file descriptor: &quot;, prog.FD())
+
+	if err := createTracepoint(&quot;do_sys_open&quot;); err != nil {
+		panic(&quot;Cannot create kprobe event: &quot; + err.Error())
+	}
+
+	eid, errGetTr := getTracepointID(&quot;do_sys_open_est123&quot;)
+	if errGetTr != nil {
+		panic(&quot;Could not get TracepointID:&quot; + err.Error())
+	}
+
+	attr := unix.PerfEventAttr{
+		Type:        unix.PERF_TYPE_TRACEPOINT,
+		Config:      eid,
+		Sample_type: unix.PERF_SAMPLE_RAW,
+		Sample:      1,
+		Wakeup:      1,
+	}
+	efd, err := unix.PerfEventOpen(&amp;attr, -1, 0, -1, unix.PERF_FLAG_FD_CLOEXEC)
+	if err != nil {
+		panic(&quot;Unable to open perf events:&quot; + err.Error())
+	}
+
+	if _, _, err := unix.Syscall(unix.SYS_IOCTL, uintptr(efd), unix.PERF_EVENT_IOC_ENABLE, 0); err != 0 {
+		panic(&quot;Unable to enable perf events:&quot; + err.Error())
+	}
+	if _, _, err := unix.Syscall(unix.SYS_IOCTL, uintptr(efd), unix.PERF_EVENT_IOC_SET_BPF, uintptr(prog.FD())); err != 0 {
+		panic(&quot;Unable to attach bpf program to perf events:&quot; + err.Error())
+	}
+	for {
+		fmt.Println(&quot;Waiting...&quot;)
+		time.Sleep(10 * time.Second)
+	}
+}
+
+</code></pre><p>As you can see the magic fades away when using the cilium library as we have to go through more steps in order to load the program and activate it.
+So what happens here is the following:</p>
+<ul>
+<li>The program gets loaded with the NewCollection() call</li>
+<li>Register the event in /sys/kernel/debug/tracing/kprobe_events with the createTracepoint() function.</li>
+<li>Get the event id with getTracepointID() . We need this so that we get the event file descriptor.</li>
+<li>Do the perf_event_open syscall which gets the event file descriptor</li>
+<li>Use the ioctl syscall to enable the event</li>
+<li>Use the ioctl syscall to attach the BPF program to the event using the event FD and the program FD</li>
+</ul>
+<p>In both cases we need a infinite loop at the end of the program that keeps the userspace program running. If it is not running the BPF programs get unloaded from the kernel.</p>
+<h3 id="iovisor-supported-bpf-programs-types">iovisor supported BPF programs types</h3>
+<p><a href="https://github.com/iovisor/gobpf/blob/e6b321d3210387d6a09bde4feba22a09e8c6f4ae/elf/elf.go#L561">https://github.com/iovisor/gobpf/blob/e6b321d3210387d6a09bde4feba22a09e8c6f4ae/elf/elf.go#L561</a></p>
+<h3 id="cilium-supported-bpf-program-types">cilium supported BPF program types</h3>
+<p><a href="https://github.com/cilium/ebpf/blob/7acf5cc039f43cc55e927f1c4b2fd161535aad26/elf_reader.go#L577">https://github.com/cilium/ebpf/blob/7acf5cc039f43cc55e927f1c4b2fd161535aad26/elf_reader.go#L577</a></p>
+<h1 id="conclusions">Conclusions</h1>
+<p>Cilium library supports loading more BPF program types than its iovisor counterpart. Although the iovisor library provides more abstraction it does this by relying on CGO which incurs cost in terms of performance as a call to CGO is much slower then a call to native GO.</p>
+<!-- raw HTML omitted -->
+<!-- raw HTML omitted -->
+
+</article>
+
+
+
+</div>
+</div>
+<script src="https://utteranc.es/client.js"
+        repo="est357/est357.github.io"
+        issue-term="pathname"
+        label="comments"
+        theme="icy-dark"
+        crossorigin="anonymous"
+        async>
+</script>
+
+</body>
+</html>
+
